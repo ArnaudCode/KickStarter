@@ -1,0 +1,228 @@
+##########################################################
+# SETUP
+##########################################################
+
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+library(caret)
+library(data.table)
+library(tidyverse)
+
+# Kickstarter Projects dataset: https://www.kaggle.com/kemical/kickstarter-projects
+data <- read.csv("https://raw.githubusercontent.com/ArnaudCode/KickStarter/main/ks-projects-201801.csv")
+
+# keeping only target records of project success or failure
+# data <- subset(data, state %in% c("successful", "failed") & usd_goal_real >= 100 & usd_goal_real <= 1000000)
+
+# keeping output steady
+set.seed(881202)
+
+# leaving 10% of dataset for validation
+test_index <- createDataPartition(y = data$ID, times = 1, p = 0.10, list = FALSE)
+training <- data[-test_index,]
+validation <- data[test_index,]
+rm(data, test_index)
+
+##########################################################
+# DATASET
+##########################################################
+
+# Q1 How many rows and columns?
+dim(training)
+
+# Q2 How many projects succeeded, failed, or were canceled?
+count(training, state)
+
+# Q3 How many different main and sub categories ?
+n_distinct(training$main_category)
+n_distinct(training$category)
+
+# Q4 How many different countries?
+n_distinct(training$country)
+
+# Q5 Which project received the highest pledge ?
+training[which.max(training$pledged), c(2, 7, 9)]
+
+# Q6 Which project had the most backers ?
+training[which.max(training$backers), c(2, 11)]
+
+# Q7 Which project had the highest pledged to backers ratio ?
+training[which.max(training$pledged / training$backers), c(2, 7, 9, 11)]
+
+##########################################################
+# PREPARATION
+##########################################################
+
+# training set
+training <- training %>% mutate(duration = round(as.Date(deadline) - as.Date(launched), digits = -1))
+training <- training %>% mutate(duration = ifelse(duration > 100, 100, duration))
+training <- training %>% mutate(month = format(as.Date(deadline), "%m"))
+training <- training %>% mutate(funded_usd = usd_pledged_real)
+training <- training %>% mutate(goal_usd = round(usd_goal_real, digits = -4))
+training <- subset(training, select = -c(currency, deadline, goal, launched, pledged, backers, usd.pledged, usd_pledged_real, usd_goal_real))
+
+# validation set
+validation <- validation %>% mutate(duration = round(as.Date(deadline) - as.Date(launched), digits = -1))
+validation <- validation %>% mutate(duration = ifelse(duration > 100, 100, duration))
+validation <- validation %>% mutate(month = format(as.Date(deadline), "%m"))
+validation <- validation %>% mutate(funded_usd = usd_pledged_real)
+validation <- validation %>% mutate(goal_usd = round(usd_goal_real, digits = -4))
+validation <- subset(validation, select = -c(currency, deadline, goal, launched, pledged, backers, usd.pledged, usd_pledged_real, usd_goal_real))
+
+##########################################################
+# EXPLORATORY
+##########################################################
+
+training %>%
+  group_by(main_category) %>%
+  summarise(avg_funding = mean(funded_usd)) %>%
+  mutate(main_category = reorder(main_category, -avg_funding)) %>%
+  ggplot(aes(x = main_category, y = avg_funding)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+training %>%
+  group_by(category) %>%
+  summarise(avg_funding = mean(funded_usd)) %>%
+  mutate(category = reorder(category, -avg_funding)) %>%
+  ggplot(aes(x = category, y = avg_funding)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+training %>%
+  group_by(duration) %>%
+  summarise(avg_funding = mean(funded_usd)) %>%
+  ggplot(aes(x = duration, y = avg_funding)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+training %>%
+  group_by(month) %>%
+  summarise(avg_funding = mean(funded_usd)) %>%
+  mutate(month = reorder(month, -avg_funding)) %>%
+  ggplot(aes(x = month, y = avg_funding)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+training %>%
+  group_by(goal_usd) %>%
+  summarise(avg_funding = mean(funded_usd)) %>%
+  ggplot(aes(x = goal_usd, y = avg_funding)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+training %>%
+  group_by(country) %>%
+  summarise(avg_funding = mean(funded_usd)) %>%
+  mutate(country = reorder(country, -avg_funding)) %>%
+  ggplot(aes(x = country, y = avg_funding)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+##########################################################
+# BASELINE: SIMPLE AVERAGE
+##########################################################
+
+mu <- mean(training$funded_usd) 
+baseline_rmse <- RMSE(validation$funded_usd, mu)
+rmse_results <- tibble(method = "baseline: simple average", RMSE = baseline_rmse)
+rmse_results %>% knitr::kable()
+  
+##########################################################
+# MODEL 1: CATEGORY EFFECT (b_c)
+##########################################################
+
+main_category_avgs <- training %>%
+  group_by(main_category) %>%
+  summarize(b_mc = mean(funded_usd - mu))
+
+predicted_funding <- mu + validation %>%
+  left_join(main_category_avgs, by='main_category') %>%
+  .$b_mc
+
+model_1_rmse <- RMSE(predicted_funding, validation$funded_usd)
+rmse_results <- bind_rows(rmse_results, tibble(method="model 1: category effect", RMSE = model_1_rmse ))
+rmse_results %>% knitr::kable()
+
+##########################################################
+# MODEL 2: DURATION EFFECT (b_d)
+##########################################################
+
+duration_avgs <- training %>% 
+  left_join(main_category_avgs, by='main_category') %>%
+  group_by(duration) %>%
+  summarize(b_d = mean(funded_usd - mu - b_mc))
+
+predicted_funding <- validation %>% 
+  left_join(main_category_avgs, by='main_category') %>%
+  left_join(duration_avgs, by='duration') %>%
+  mutate(pred = mu + b_mc + b_d) %>%
+  .$pred
+
+model_2_rmse <- RMSE(predicted_funding, validation$funded_usd)
+rmse_results <- bind_rows(rmse_results, tibble(method="model 2: category + duration effect", RMSE = model_2_rmse ))
+rmse_results %>% knitr::kable()
+
+##########################################################
+# MODEL 3: COUNTRY EFFECT (b_ct)
+##########################################################
+
+country_avgs <- training %>% 
+  left_join(main_category_avgs, by='main_category') %>%
+  left_join(duration_avgs, by='duration') %>%
+  group_by(country) %>%
+  summarize(b_ct = mean(funded_usd - mu - b_mc - b_d))
+
+predicted_funding <- validation %>% 
+  left_join(main_category_avgs, by='main_category') %>%
+  left_join(duration_avgs, by='duration') %>%
+  left_join(country_avgs, by='country') %>%
+  mutate(pred = mu + b_mc + b_d + b_ct) %>%
+  .$pred
+
+model_3_rmse <- RMSE(predicted_funding, validation$funded_usd)
+rmse_results <- bind_rows(rmse_results, tibble(method="model 3: category + duration + country effect", RMSE = model_3_rmse ))
+rmse_results %>% knitr::kable()
+
+##########################################################
+# REGULARISATION
+##########################################################
+
+lambdas <- seq(0, 100000, 10000)
+rmses <- sapply(lambdas, function(l){
+  b_mc <- training %>%
+    group_by(main_category) %>%
+    summarize(b_mc = sum(funded_usd - mu)/(n()+l))
+  b_d <- training %>%
+    left_join(b_mc, by="main_category") %>%
+    group_by(duration) %>%
+    summarize(b_d = sum(funded_usd - mu - b_mc)/(n()+l))
+  b_ct <- training %>%
+    left_join(b_mc, by="main_category") %>%
+    left_join(b_d, by="duration") %>%
+    group_by(country) %>%
+    summarize(b_ct = sum(funded_usd - mu - b_mc - b_d)/(n()+l))
+  predicted_funding <- validation %>%
+    left_join(b_mc, by="main_category") %>%
+    left_join(b_d, by="duration") %>%
+    left_join(b_ct, by="country") %>%
+    mutate(pred = mu + b_mc + b_d + b_ct) %>%
+    .$pred
+  return(RMSE(predicted_funding, training$funded_usd))
+})
+
+qplot(lambdas, rmses)
+lambda <- lambdas[which.min(rmses)]
+lambda
+
+model_4_rmse <- min(rmses)
+rmse_results <- bind_rows(rmse_results, tibble(method="model 4: model 3 regularized", RMSE = model_4_rmse))
+rmse_results %>% knitr::kable()
+
+##########################################################
+# FINAL
+##########################################################
+
+final_rmse <- model_4_rmse
+final_rmse
